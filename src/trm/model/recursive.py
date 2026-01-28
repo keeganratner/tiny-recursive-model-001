@@ -37,6 +37,8 @@ class RecursiveRefinement(nn.Module):
         outer_steps: Number of outer loop iterations T (default 3)
         inner_steps: Number of inner loop iterations n (default 6)
         num_colors: Number of ARC color classes (default 10)
+        halt_threshold: Confidence threshold for early stopping (default 0.9)
+        enable_halting: Whether to enable adaptive halting (default True)
     """
 
     def __init__(
@@ -46,6 +48,8 @@ class RecursiveRefinement(nn.Module):
         outer_steps: int = 3,
         inner_steps: int = 6,
         num_colors: int = 10,
+        halt_threshold: float = 0.9,
+        enable_halting: bool = True,
     ):
         super().__init__()
         self.network = network
@@ -53,6 +57,8 @@ class RecursiveRefinement(nn.Module):
         self.outer_steps = outer_steps
         self.inner_steps = inner_steps
         self.num_colors = num_colors
+        self.halt_threshold = halt_threshold
+        self.enable_halting = enable_halting
 
     def _combine_states(
         self,
@@ -143,6 +149,7 @@ class RecursiveRefinement(nn.Module):
                 - logits: Final answer state of shape (B, H, W, num_colors)
                 - halt_confidence: Halting confidence from last network call (B,)
                 - iterations: Total number of network forward passes (int)
+                - halted_early: Boolean indicating if halting stopped early (bool)
         """
         B, H, W = x.shape
 
@@ -151,6 +158,7 @@ class RecursiveRefinement(nn.Module):
 
         # Track total iterations
         total_iterations = 0
+        halted_early = False
 
         # Outer loop: Refine answer state y
         for t in range(self.outer_steps):
@@ -182,9 +190,18 @@ class RecursiveRefinement(nn.Module):
             y = output["logits"]
             total_iterations += 1
 
+            # Check halting condition after each outer iteration
+            if self.enable_halting:
+                halt_confidence = output["halt_confidence"]  # (B,)
+                # All batch items must exceed threshold to halt
+                if (halt_confidence >= self.halt_threshold).all():
+                    halted_early = True
+                    break
+
         # Return final answer state with metadata
         return {
             "logits": y,
             "halt_confidence": output["halt_confidence"],  # from last network call
             "iterations": total_iterations,
+            "halted_early": halted_early,
         }
