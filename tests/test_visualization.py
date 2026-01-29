@@ -13,6 +13,8 @@ from src.trm.visualization import (
     render_iteration_timeline,
     compute_iteration_losses,
     ARC_COLORMAP,
+    InteractiveTimelineRenderer,
+    render_interactive_timeline,
 )
 from src.trm.model.recursive import RecursiveRefinement
 from src.trm.model.network import TRMNetwork
@@ -417,3 +419,190 @@ class TestLossComputation:
         assert history.iteration_losses is not None
         assert isinstance(history.iteration_losses, list)
         assert len(history.iteration_losses) == len(history.iteration_grids)
+
+
+class TestInteractiveTimelineRenderer:
+    """Tests for InteractiveTimelineRenderer class."""
+
+    def test_interactive_renderer_returns_figure(self, minimal_model, sample_grids):
+        """Verify render_interactive returns plotly Figure."""
+        plotly = pytest.importorskip("plotly")
+        import plotly.graph_objects as go
+
+        input_grid, target_grid = sample_grids
+        capture = IterationHistoryCapture(minimal_model)
+        history = capture.capture_with_losses(input_grid, target_grid)
+
+        renderer = InteractiveTimelineRenderer()
+        fig = renderer.render_interactive(
+            history, target_grid, history.iteration_losses
+        )
+
+        assert isinstance(fig, go.Figure)
+
+    def test_interactive_has_slider(self, minimal_model, sample_grids):
+        """Verify figure has slider control for iterations."""
+        plotly = pytest.importorskip("plotly")
+
+        input_grid, target_grid = sample_grids
+        capture = IterationHistoryCapture(minimal_model)
+        history = capture.capture_with_losses(input_grid, target_grid)
+
+        renderer = InteractiveTimelineRenderer()
+        fig = renderer.render_interactive(
+            history, target_grid, history.iteration_losses
+        )
+
+        # Check that figure has sliders
+        assert hasattr(fig, "layout")
+        assert hasattr(fig.layout, "sliders")
+        assert fig.layout.sliders is not None
+        assert len(fig.layout.sliders) > 0
+
+    def test_interactive_loss_plot_present(self, minimal_model, sample_grids):
+        """Verify loss subplot exists when losses provided."""
+        plotly = pytest.importorskip("plotly")
+
+        input_grid, target_grid = sample_grids
+        capture = IterationHistoryCapture(minimal_model)
+        history = capture.capture_with_losses(input_grid, target_grid)
+
+        renderer = InteractiveTimelineRenderer()
+        fig = renderer.render_interactive(
+            history, target_grid, history.iteration_losses
+        )
+
+        # Figure should have traces (grid heatmap + loss plot)
+        assert len(fig.data) > 0
+
+        # Check for loss plot trace (Scatter type)
+        has_scatter = any(trace.type == "scatter" for trace in fig.data)
+        assert has_scatter, "Loss plot should include scatter trace"
+
+    def test_interactive_html_export(self, minimal_model, sample_grids):
+        """Verify write_html creates valid file."""
+        plotly = pytest.importorskip("plotly")
+
+        input_grid, target_grid = sample_grids
+        capture = IterationHistoryCapture(minimal_model)
+        history = capture.capture_with_losses(input_grid, target_grid)
+
+        renderer = InteractiveTimelineRenderer()
+        fig = renderer.render_interactive(
+            history, target_grid, history.iteration_losses
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "timeline.html"
+
+            # Export to HTML
+            fig.write_html(str(output_path), include_plotlyjs=True)
+
+            # File should exist and have content
+            assert output_path.exists()
+            assert output_path.stat().st_size > 0
+
+    def test_interactive_standalone_html(self, minimal_model, sample_grids):
+        """Verify HTML contains embedded plotly.js."""
+        plotly = pytest.importorskip("plotly")
+
+        input_grid, target_grid = sample_grids
+        capture = IterationHistoryCapture(minimal_model)
+        history = capture.capture_with_losses(input_grid, target_grid)
+
+        renderer = InteractiveTimelineRenderer()
+        fig = renderer.render_interactive(
+            history, target_grid, history.iteration_losses
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "timeline.html"
+
+            # Export to HTML with embedded plotly
+            fig.write_html(str(output_path), include_plotlyjs=True)
+
+            # Read file and check for plotly.js (use UTF-8 encoding)
+            html_content = output_path.read_text(encoding='utf-8')
+
+            # Should contain plotly code (not just CDN link)
+            assert "plotly" in html_content.lower()
+            # Check for embedded JS (characteristic of include_plotlyjs=True)
+            assert len(html_content) > 100000  # Embedded plotly.js is large
+
+    def test_interactive_without_losses(self, minimal_model, sample_grids):
+        """Verify renderer works without loss plot."""
+        plotly = pytest.importorskip("plotly")
+
+        input_grid, target_grid = sample_grids
+        capture = IterationHistoryCapture(minimal_model)
+        history = capture.capture(input_grid)  # No losses
+
+        renderer = InteractiveTimelineRenderer()
+        fig = renderer.render_interactive(history, target_grid, losses=None)
+
+        # Should still return valid figure
+        assert hasattr(fig, "data")
+        assert len(fig.data) > 0
+
+
+class TestRenderInteractiveTimeline:
+    """Tests for render_interactive_timeline convenience function."""
+
+    def test_returns_figure(self, minimal_model, sample_grids):
+        """Verify function returns plotly Figure."""
+        plotly = pytest.importorskip("plotly")
+        import plotly.graph_objects as go
+
+        input_grid, target_grid = sample_grids
+        capture = IterationHistoryCapture(minimal_model)
+        history = capture.capture_with_losses(input_grid, target_grid)
+
+        fig = render_interactive_timeline(
+            history, target_grid, history.iteration_losses
+        )
+
+        assert isinstance(fig, go.Figure)
+
+    def test_saves_html_file(self, minimal_model, sample_grids):
+        """Verify output_path creates HTML file."""
+        plotly = pytest.importorskip("plotly")
+
+        input_grid, target_grid = sample_grids
+        capture = IterationHistoryCapture(minimal_model)
+        history = capture.capture_with_losses(input_grid, target_grid)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "timeline.html"
+
+            fig = render_interactive_timeline(
+                history,
+                target_grid,
+                history.iteration_losses,
+                output_path=str(output_path),
+            )
+
+            # File should exist
+            assert output_path.exists()
+            assert output_path.stat().st_size > 0
+
+    def test_returns_figure_even_with_save(self, minimal_model, sample_grids):
+        """Even with output_path, should return Figure."""
+        plotly = pytest.importorskip("plotly")
+        import plotly.graph_objects as go
+
+        input_grid, target_grid = sample_grids
+        capture = IterationHistoryCapture(minimal_model)
+        history = capture.capture_with_losses(input_grid, target_grid)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "timeline.html"
+
+            fig = render_interactive_timeline(
+                history,
+                target_grid,
+                history.iteration_losses,
+                output_path=str(output_path),
+            )
+
+            # Should return figure even when saving
+            assert isinstance(fig, go.Figure)
