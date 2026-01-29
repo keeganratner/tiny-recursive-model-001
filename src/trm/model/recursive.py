@@ -205,3 +205,89 @@ class RecursiveRefinement(nn.Module):
             "iterations": total_iterations,
             "halted_early": halted_early,
         }
+
+    def forward_with_intermediates(self, x: torch.Tensor) -> dict:
+        """
+        Apply recursive refinement while collecting intermediate states at each outer iteration.
+
+        Same nested loop structure as forward(), but stores y and halt_confidence after each
+        outer iteration. This enables deep supervision where losses can be computed at
+        intermediate reasoning steps, not just the final output.
+
+        Args:
+            x: Input grid tensor of shape (B, H, W) with values 0-9 or -1 (padding)
+
+        Returns:
+            Dictionary containing:
+                - final_logits: Final answer state of shape (B, H, W, num_colors)
+                - final_halt_confidence: Halting confidence from last network call (B,)
+                - intermediate_states: List of dicts, one per outer iteration completed:
+                    - logits: Answer state y at that iteration (B, H, W, num_colors)
+                    - halt_confidence: Confidence at that iteration (B,)
+                    - iteration: Outer iteration index (0-indexed)
+                - iterations: Total number of network forward passes (int)
+                - halted_early: Boolean indicating if halting stopped early (bool)
+        """
+        B, H, W = x.shape
+
+        # Initialize answer state y to zeros (B, H, W, num_colors)
+        y = torch.zeros(B, H, W, self.num_colors, device=x.device, dtype=torch.float32)
+
+        # Track total iterations and intermediate states
+        total_iterations = 0
+        halted_early = False
+        intermediate_states = []
+
+        # Outer loop: Refine answer state y
+        for t in range(self.outer_steps):
+            # Initialize/reset latent state z to zeros at start of each outer iteration
+            z = torch.zeros_like(y)
+
+            # Inner loop: Refine latent state z
+            for i in range(self.inner_steps):
+                # Combine x (raw), y (logits), z (logits)
+                combined = self._combine_states(
+                    states=[x, y, z],
+                    is_logits=[False, True, True]
+                )
+
+                # Forward through transformer and heads (bypassing embedding)
+                output = self._forward_through_network(combined)
+                z = output["logits"]
+                total_iterations += 1
+
+            # After inner loop completes, update answer state y
+            # Combine only y and z (no x for answer update per paper)
+            combined_yz = self._combine_states(
+                states=[y, z],
+                is_logits=[True, True]
+            )
+
+            # Forward through transformer and heads (bypassing embedding)
+            output = self._forward_through_network(combined_yz)
+            y = output["logits"]
+            total_iterations += 1
+
+            # Store intermediate state after this outer iteration (clone to avoid reference issues)
+            intermediate_states.append({
+                "logits": y.clone(),
+                "halt_confidence": output["halt_confidence"].clone(),
+                "iteration": t,
+            })
+
+            # Check halting condition after each outer iteration
+            if self.enable_halting:
+                halt_confidence = output["halt_confidence"]  # (B,)
+                # All batch items must exceed threshold to halt
+                if (halt_confidence >= self.halt_threshold).all():
+                    halted_early = True
+                    break
+
+        # Return final answer state with intermediate states and metadata
+        return {
+            "final_logits": y,
+            "final_halt_confidence": output["halt_confidence"],
+            "intermediate_states": intermediate_states,
+            "iterations": total_iterations,
+            "halted_early": halted_early,
+        }
