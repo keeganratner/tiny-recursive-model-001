@@ -296,6 +296,43 @@ Training includes patience-based early stopping to prevent overfitting on the sm
 - **Prevents overfitting:** Stops training when model stops improving, avoiding wasted compute
 - **Preserves best model:** Best checkpoint remains saved even after early stopping
 
+## Visualization
+
+The iteration timeline visualization shows how the model's answer evolves across recursive refinement steps.
+
+### Generating a Timeline
+
+```bash
+python scripts/visualize.py \
+    --checkpoint checkpoints/best_model.pt \
+    --task-id 007bbfb7 \
+    --output timeline.png
+```
+
+### Understanding the Timeline
+
+The visualization displays:
+- **Top row**: Input puzzle (static reference)
+- **Middle rows**: Model's answer at each outer iteration (1, 2, 3)
+- **Bottom row**: Target solution (ground truth)
+
+Color coding shows:
+- **Green border**: Correct cell (matches target)
+- **Red border**: Incorrect cell (doesn't match target)
+- **Yellow border**: Changed from previous iteration
+
+### CLI Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--checkpoint, -c` | Path to model checkpoint | Required |
+| `--task-id, -t` | ARC task ID to visualize | Required |
+| `--output, -o` | Output image path | `timeline.png` |
+| `--pair-index, -p` | Train pair index | `0` |
+| `--no-target` | Hide target grid | False |
+| `--no-diff` | Disable color coding | False |
+| `--dpi` | Image resolution | `150` |
+
 ## Hyperparameters
 
 All hyperparameters are configured in `configs/config.yaml` and can be overridden via command-line arguments.
