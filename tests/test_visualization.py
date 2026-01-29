@@ -11,6 +11,7 @@ from src.trm.visualization import (
     IterationHistoryCapture,
     IterationTimelineRenderer,
     render_iteration_timeline,
+    compute_iteration_losses,
     ARC_COLORMAP,
 )
 from src.trm.model.recursive import RecursiveRefinement
@@ -287,3 +288,132 @@ class TestRenderIterationTimeline:
             assert isinstance(fig, plt.Figure)
 
             plt.close(fig)
+
+
+class TestHaltingIndicators:
+    """Tests for halting indicators in renderer."""
+
+    def test_render_shows_halted_label(self, minimal_model, sample_grids):
+        """When history.halted_early=True, verify figure contains 'HALTED' text."""
+        input_grid, target_grid = sample_grids
+        capture = IterationHistoryCapture(minimal_model)
+        history = capture.capture(input_grid)
+
+        # Manually set halted_early to True for testing
+        history.halted_early = True
+
+        renderer = IterationTimelineRenderer()
+        fig = renderer.render_timeline(history, target_grid)
+
+        # Check that the last iteration title contains "HALTED"
+        last_iteration_ax = fig.axes[-2]  # Second to last (before target)
+        title_text = last_iteration_ax.get_title()
+
+        assert "[HALTED]" in title_text
+
+        plt.close(fig)
+
+    def test_render_shows_max_iter_label(self, minimal_model, sample_grids):
+        """When history.halted_early=False, verify figure contains 'MAX ITER' text."""
+        input_grid, target_grid = sample_grids
+        capture = IterationHistoryCapture(minimal_model)
+        history = capture.capture(input_grid)
+
+        # halted_early should be False by default (model has halting disabled)
+        assert history.halted_early is False
+
+        renderer = IterationTimelineRenderer()
+        fig = renderer.render_timeline(history, target_grid)
+
+        # Check that the last iteration title contains "MAX ITER"
+        last_iteration_ax = fig.axes[-2]  # Second to last (before target)
+        title_text = last_iteration_ax.get_title()
+
+        assert "[MAX ITER]" in title_text
+
+        plt.close(fig)
+
+    def test_halting_iteration_emphasized(self, minimal_model, sample_grids):
+        """Verify halting iteration has bold font weight."""
+        input_grid, target_grid = sample_grids
+        capture = IterationHistoryCapture(minimal_model)
+        history = capture.capture(input_grid)
+
+        renderer = IterationTimelineRenderer()
+        fig = renderer.render_timeline(history, target_grid)
+
+        # Check that the last iteration has bold title
+        last_iteration_ax = fig.axes[-2]  # Second to last (before target)
+        title_obj = last_iteration_ax.title
+
+        # Check fontweight property
+        assert title_obj.get_fontweight() in ['bold', 700, 'heavy']  # Various bold representations
+
+        plt.close(fig)
+
+
+class TestLossComputation:
+    """Tests for loss computation functionality."""
+
+    def test_compute_iteration_losses_returns_list(self, minimal_model, sample_grids):
+        """Verify compute_iteration_losses returns list of floats."""
+        input_grid, target_grid = sample_grids
+        capture = IterationHistoryCapture(minimal_model)
+        history = capture.capture(input_grid)
+
+        losses = compute_iteration_losses(history, target_grid)
+
+        assert isinstance(losses, list)
+        assert all(isinstance(loss, float) for loss in losses)
+
+    def test_compute_iteration_losses_length(self, minimal_model, sample_grids):
+        """Length matches number of iterations."""
+        input_grid, target_grid = sample_grids
+        capture = IterationHistoryCapture(minimal_model)
+        history = capture.capture(input_grid)
+
+        losses = compute_iteration_losses(history, target_grid)
+
+        assert len(losses) == len(history.iteration_grids)
+
+    def test_compute_iteration_losses_range(self, minimal_model, sample_grids):
+        """Values are between 0.0 and 1.0."""
+        input_grid, target_grid = sample_grids
+        capture = IterationHistoryCapture(minimal_model)
+        history = capture.capture(input_grid)
+
+        losses = compute_iteration_losses(history, target_grid)
+
+        for loss in losses:
+            assert 0.0 <= loss <= 1.0
+
+    def test_compute_iteration_losses_handles_padding(self, minimal_model):
+        """Padding cells (value -1) are ignored."""
+        # Create grids with padding (must be long tensors)
+        input_grid = torch.zeros(5, 5, dtype=torch.long)
+        target_grid = torch.zeros(5, 5, dtype=torch.long)
+        target_grid[3:, :] = -1  # Add padding to bottom rows
+
+        capture = IterationHistoryCapture(minimal_model)
+        history = capture.capture(input_grid)
+
+        # Manually set one iteration to match target (except padding)
+        history.iteration_grids[0][:3, :] = 0  # Match non-padded region
+        history.iteration_grids[0][3:, :] = 5  # Different values in padded region
+
+        losses = compute_iteration_losses(history, target_grid)
+
+        # Should return 1.0 because padded region is ignored
+        assert losses[0] == 1.0
+
+    def test_capture_with_losses(self, minimal_model, sample_grids):
+        """Verify capture_with_losses returns history with losses populated."""
+        input_grid, target_grid = sample_grids
+        capture = IterationHistoryCapture(minimal_model)
+
+        history = capture.capture_with_losses(input_grid, target_grid)
+
+        # Check that iteration_losses is populated
+        assert history.iteration_losses is not None
+        assert isinstance(history.iteration_losses, list)
+        assert len(history.iteration_losses) == len(history.iteration_grids)
