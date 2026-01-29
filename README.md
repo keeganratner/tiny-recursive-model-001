@@ -110,3 +110,96 @@ trm001/
     ├── test_training.py    # Training mechanics tests
     └── test_*.py           # Additional test modules
 ```
+
+## Architecture
+
+### Overview
+
+The TRM achieves remarkable parameter efficiency through weight sharing: a single 2-layer transformer is applied recursively in a nested loop structure. With default hyperparameters (T=3 outer iterations, n=6 inner iterations), the network makes 21 forward passes per inference, equivalent to an effective depth of 42 transformer layers while maintaining only 10.5M parameters.
+
+This recursive refinement approach demonstrates that reasoning depth and parameter count can be decoupled - the model can perform deep reasoning without requiring a physically deep network.
+
+### Architecture Diagram
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                    TRM Architecture Flow                      │
+├──────────────────────────────────────────────────────────────┤
+│                                                               │
+│  Input Grid (x)     ──┐                                       │
+│  [B, H, W]            │                                       │
+│                       │                                       │
+│  ┌────────────────────▼─────────────────────┐                │
+│  │        Outer Loop (T=3 iterations)       │                │
+│  │                                           │                │
+│  │  ┌─────────────────────────────────────┐ │                │
+│  │  │   Inner Loop (n=6 iterations)       │ │                │
+│  │  │                                     │ │                │
+│  │  │   Combine: x + y + z                │ │                │
+│  │  │       ↓                             │ │                │
+│  │  │   z = TRMNetwork(combined)          │ │                │
+│  │  │       ↓                             │ │                │
+│  │  │   (repeat n=6 times)                │ │                │
+│  │  └─────────────────────────────────────┘ │                │
+│  │                                           │                │
+│  │  Combine: y + z (after inner loop)        │                │
+│  │       ↓                                   │                │
+│  │  y = TRMNetwork(combined)                 │                │
+│  │       ↓                                   │                │
+│  │  Check halting confidence ≥ threshold?   │                │
+│  │       ↓                                   │                │
+│  └───────────────────────────────────────────┘                │
+│                       ↓                                       │
+│  Output Grid (y)                                              │
+│  [B, H, W, 10]                                                │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Weight Sharing:** The same `TRMNetwork` instance is reused for all 21 forward passes (6 inner × 3 outer + 3 outer updates). This is the key innovation enabling parameter efficiency.
+
+### TRMNetwork Components
+
+| Component | Input Shape | Output Shape | Description |
+|-----------|-------------|--------------|-------------|
+| **GridEmbedding** | (B, H, W) | (B, H, W, 512) | Converts 10-color grid cells to 512-dimensional vectors. Uses 11 embeddings: 0-9 for ARC colors, 10 for padding. |
+| **TRMStack** | (B, H×W, 512) | (B, H×W, 512) | 2-layer transformer with RMSNorm, multi-head self-attention (8 heads), SwiGLU activation, and rotary positional embeddings. |
+| **OutputHead** | (B, H×W, 512) | (B, H×W, 10) | Linear projection from hidden states to 10-class color logits. No softmax (applied in loss). |
+| **HaltingHead** | (B, H×W, 512) | (B,) | Global average pooling over sequence, then linear projection to scalar confidence score with sigmoid activation. |
+
+### Recursive State Flow
+
+The TRM maintains two evolving states during recursion:
+
+- **z (latent state)**: Updated n=6 times per outer iteration. Accumulates intermediate reasoning. Reset to zeros at the start of each outer iteration.
+- **y (answer state)**: Updated once per outer iteration. Represents the current answer prediction. Initialized to zeros and refined across T=3 outer iterations.
+
+**State combination:** States are combined by converting logits to hard predictions (argmax), embedding them, and summing the embeddings element-wise:
+- Inner loop: `combined = embed(x) + embed(argmax(y)) + embed(argmax(z))`
+- Outer loop: `combined = embed(argmax(y)) + embed(argmax(z))`
+
+### Paper Alignment
+
+| Paper Specification | Implementation | Notes |
+|---------------------|----------------|-------|
+| ~7M parameters | 10.5M parameters | Higher due to hidden_dim=512; paper doesn't specify exact hyperparameters |
+| 2-layer transformer | 2-layer TRMStack | Matches specification |
+| RMSNorm | RMSNorm | No mean centering, weight-only normalization |
+| SwiGLU activation | SwiGLU with 8/3 expansion | Gated activation in FFN layers |
+| Rotary embeddings | RotaryEmbedding (2D) | Positional encoding for 2D grid structure |
+| No bias | bias=False everywhere | All nn.Linear and nn.Embedding layers |
+| T=3, n=6 | Default T=3, n=6 | Configurable via configs/config.yaml |
+| Halting threshold | 0.9 (configurable) | Early stopping when confidence ≥ threshold |
+| Deep supervision | Up to 16 steps | Intermediate losses at each outer iteration |
+| EMA smoothing | 0.999 decay | Exponential moving average of weights |
+| Data augmentation | D8 + color permutation | 8 geometric transforms × 3.6M color perms = 29M× |
+
+### Key Implementation Details
+
+**Grid-to-Sequence Transformation:** ARC grids are 2D, but transformers operate on sequences. The TRMNetwork flattens spatial dimensions (B, H, W) → (B, H×W) before the transformer and reshapes back (B, H×W, 10) → (B, H, W, 10) after the output head.
+
+**Adaptive Halting:** After each outer iteration, the halting head produces a confidence score. If ALL batch items exceed the threshold (default 0.9), recursion stops early. This enables the model to use fewer iterations for easier problems.
+
+**Deep Supervision:** During training, losses are computed at intermediate outer iterations (not just the final output). This provides more training signal and helps gradients flow through the recursive structure. Gradients are detached between iterations to prevent backpropagation through the entire recursion chain.
+
+**Parameter Efficiency:** With 10.5M parameters and 21 forward passes, the TRM achieves effective depth comparable to a 42-layer transformer (which would require ~221M parameters with the same architecture).
+
