@@ -108,8 +108,23 @@ class IterationTimelineRenderer:
 
         # Rows 1-N: Iteration grids
         for iter_idx, (grid, confidence) in enumerate(zip(iteration_grids, confidences)):
-            title = f"Iteration {iter_idx} (conf={confidence:.3f})"
-            self._render_grid(axes[row_idx], grid, title)
+            # Check if this is the last iteration (potential halting point)
+            is_last_iteration = (iter_idx == len(iteration_grids) - 1)
+
+            # Build title with confidence and halting indicator
+            if is_last_iteration:
+                if history.halted_early:
+                    status_label = "[HALTED]"
+                    title_fontweight = 'bold'
+                else:
+                    status_label = "[MAX ITER]"
+                    title_fontweight = 'bold'
+                title = f"Iteration {iter_idx} | conf: {confidence:.3f} {status_label}"
+            else:
+                title = f"Iteration {iter_idx} | conf: {confidence:.3f}"
+                title_fontweight = 'normal'
+
+            self._render_grid(axes[row_idx], grid, title, fontweight=title_fontweight)
 
             # Add diff overlay if requested
             if show_diff and target_grid is not None:
@@ -128,7 +143,7 @@ class IterationTimelineRenderer:
 
         return fig
 
-    def _render_grid(self, ax: plt.Axes, grid: torch.Tensor, title: str) -> None:
+    def _render_grid(self, ax: plt.Axes, grid: torch.Tensor, title: str, fontweight: str = 'normal') -> None:
         """
         Render single grid with imshow.
 
@@ -136,6 +151,7 @@ class IterationTimelineRenderer:
             ax: Matplotlib axes to render on
             grid: Grid tensor (H, W) with values 0-9 or -1 (padding)
             title: Title for this grid
+            fontweight: Font weight for title ('normal' or 'bold')
         """
         # Convert to numpy for matplotlib
         grid_np = grid.cpu().numpy()
@@ -147,8 +163,8 @@ class IterationTimelineRenderer:
         # Render with ARC colormap
         ax.imshow(grid_display, cmap=self.colormap, vmin=0, vmax=9, interpolation="nearest")
 
-        # Set title
-        ax.set_title(title, fontsize=10, pad=5)
+        # Set title with optional font weight
+        ax.set_title(title, fontsize=10, pad=5, fontweight=fontweight)
 
         # Remove axis ticks but keep grid
         ax.set_xticks([])
