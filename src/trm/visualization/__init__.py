@@ -6,6 +6,10 @@ from .renderer import (
     IterationTimelineRenderer,
     render_iteration_timeline,
 )
+from .interactive import (
+    InteractiveTimelineRenderer,
+    render_interactive_timeline,
+)
 
 __all__ = [
     "IterationHistory",
@@ -14,4 +18,6 @@ __all__ = [
     "IterationTimelineRenderer",
     "render_iteration_timeline",
     "ARC_COLORMAP",
+    "InteractiveTimelineRenderer",
+    "render_interactive_timeline",
 ]
