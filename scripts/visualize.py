@@ -13,7 +13,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from trm.model import TRMNetwork, RecursiveRefinement
 from trm.model.embedding import GridEmbedding
 from trm.data.dataset import ARCDataset
-from trm.visualization import IterationHistoryCapture, render_iteration_timeline
+from trm.visualization import (
+    IterationHistoryCapture,
+    render_iteration_timeline,
+    render_interactive_timeline,
+    compute_iteration_losses,
+)
 from trm.evaluation.checkpointing import load_checkpoint
 from trm.training.deep_supervision import DeepSupervisionTrainer
 
@@ -37,8 +42,13 @@ def main():
     parser.add_argument(
         "--output", "-o",
         type=str,
-        default="timeline.png",
-        help="Output image path (default: timeline.png)"
+        default=None,
+        help="Output file path (default: timeline.png for PNG, timeline.html for HTML)"
+    )
+    parser.add_argument(
+        "--html", "-H",
+        action="store_true",
+        help="Output interactive HTML instead of PNG (use with --output)"
     )
     parser.add_argument(
         "--pair-index", "-p",
@@ -139,23 +149,53 @@ def main():
     # Capture iteration history
     print("Running inference and capturing history...")
     capture = IterationHistoryCapture(refinement)
-    history = capture.capture(input_grid.unsqueeze(0))  # Add batch dimension
+
+    # Determine target grid (None if --no-target)
+    target = None if args.no_target else target_grid
+
+    # Capture with or without losses based on format
+    if args.html and target is not None:
+        # For HTML, capture with losses for the loss plot
+        history = capture.capture_with_losses(input_grid.unsqueeze(0), target)
+    else:
+        # For PNG or no target, just capture history
+        history = capture.capture(input_grid.unsqueeze(0))  # Add batch dimension
 
     print(f"Captured {len(history.iteration_grids)} iterations")
     print(f"Halted early: {history.halted_early}")
 
-    # Render and save timeline
-    print(f"Rendering timeline to {args.output}...")
-    target = None if args.no_target else target_grid
-    fig = render_iteration_timeline(
-        history=history,
-        target_grid=target,
-        output_path=args.output,
-        show_diff=not args.no_diff,
-        dpi=args.dpi,
-    )
+    # Determine output path
+    if args.output is None:
+        # Set default based on format
+        output_path = "timeline.html" if args.html else "timeline.png"
+    else:
+        output_path = args.output
+        # Warn if extension mismatch
+        if args.html and output_path.endswith(".png"):
+            print(f"Warning: --html specified but output ends with .png")
+            output_path = output_path.replace(".png", ".html")
+            print(f"Changed output to: {output_path}")
 
-    print(f"Successfully saved timeline to {args.output}")
+    # Render and save timeline
+    if args.html:
+        print(f"Rendering interactive HTML to {output_path}...")
+        fig = render_interactive_timeline(
+            history=history,
+            target_grid=target,
+            losses=history.iteration_losses,
+            output_path=output_path,
+        )
+        print(f"Interactive timeline saved to {output_path}. Open in any web browser.")
+    else:
+        print(f"Rendering timeline to {output_path}...")
+        fig = render_iteration_timeline(
+            history=history,
+            target_grid=target,
+            output_path=output_path,
+            show_diff=not args.no_diff,
+            dpi=args.dpi,
+        )
+        print(f"Successfully saved timeline to {output_path}")
 
 
 if __name__ == "__main__":
