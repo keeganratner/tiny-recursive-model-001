@@ -321,6 +321,34 @@ Color coding shows:
 - **Red border**: Incorrect cell (doesn't match target)
 - **Yellow border**: Changed from previous iteration
 
+### Halting Indicators
+
+Each iteration is labeled with the model's halting status:
+- **[HALTED]**: Model stopped early when confidence threshold reached (≥0.9)
+- **[MAX ITER]**: Model ran all outer iterations without reaching confidence threshold
+
+These labels help identify whether the model was confident in its answer or required maximum reasoning steps.
+
+### Interactive HTML Visualization
+
+For an interactive visualization with iteration controls and loss tracking:
+
+```bash
+python scripts/visualize.py \
+    --checkpoint checkpoints/best_model.pt \
+    --task-id 007bbfb7 \
+    --html \
+    --output timeline.html
+```
+
+Open `timeline.html` in any web browser. The interactive visualization includes:
+- **Iteration slider**: Step through iterations manually or use play controls
+- **Loss plot**: See accuracy evolution across iterations (1.0 = perfect match)
+- **Halting indicator**: Shows when model stopped early ([HALTED] or [MAX ITER])
+- **Confidence scores**: Displayed for each iteration to show model certainty
+
+The HTML file is standalone and can be shared without Python installation.
+
 ### CLI Options
 
 | Option | Description | Default |
@@ -328,10 +356,11 @@ Color coding shows:
 | `--checkpoint, -c` | Path to model checkpoint | Required |
 | `--task-id, -t` | ARC task ID to visualize | Required |
 | `--output, -o` | Output image path | `timeline.png` |
+| `--html, -H` | Generate interactive HTML instead of static PNG | False |
 | `--pair-index, -p` | Train pair index | `0` |
 | `--no-target` | Hide target grid | False |
 | `--no-diff` | Disable color coding | False |
-| `--dpi` | Image resolution | `150` |
+| `--dpi` | Image resolution (PNG only) | `150` |
 
 ## Hyperparameters
 
