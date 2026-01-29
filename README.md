@@ -203,3 +203,96 @@ The TRM maintains two evolving states during recursion:
 
 **Parameter Efficiency:** With 10.5M parameters and 21 forward passes, the TRM achieves effective depth comparable to a 42-layer transformer (which would require ~221M parameters with the same architecture).
 
+## Training
+
+### Basic Training
+
+The TRM uses CrossEntropy loss for grid prediction and Binary CrossEntropy (BCE) for halting confidence. Training employs the AdamW optimizer with beta1=0.9, beta2=0.95, and weight_decay=0.01. In basic training mode, supervision is applied only to the final output (terminal supervision).
+
+```bash
+python scripts/train.py --epochs 50
+```
+
+### Deep Supervision (Recommended)
+
+Deep supervision computes loss at each of up to 16 supervision steps during recursion, providing richer training signal throughout the recursive refinement process. This approach includes several key mechanisms for training stability:
+
+- **Gradient detachment:** After each supervision step, `z.detach()` and `y.detach()` prevent backpropagation through previous iterations, keeping memory constant regardless of supervision depth
+- **Loss normalization:** Total loss is divided by `steps_taken` to maintain consistent scale whether the model halts at step 1 or step 16
+- **EMA weight smoothing:** Exponential moving average with decay=0.999 provides stable model weights for validation
+- **Gradient clipping:** Max norm of 1.0 prevents gradient explosion during training
+
+```bash
+python scripts/train.py --deep-supervision --epochs 50 --patience 5
+```
+
+### Why Deep Supervision Works
+
+Each supervision step provides a learning signal to the recursive refinement process. The critical innovation is gradient detachment: by applying `z.detach()` and `y.detach()` after computing each step's loss, we prevent gradients from flowing through the entire recursion chain. This means:
+
+- Memory usage stays constant regardless of supervision depth
+- Each step learns independently while still benefiting from the recursive structure
+- Loss normalization by `steps_taken` ensures consistent loss scale across variable halting
+- The model learns both to refine answers AND when to halt confidently
+
+## Data Augmentation
+
+The TRM employs two complementary augmentation strategies that can dramatically expand the effective training set size:
+
+### Augmentation Strategies
+
+| Transform | Multiplier | Description |
+|-----------|------------|-------------|
+| None | 1× | Original data only |
+| D8 Dihedral | 8× | 4 rotations (0°, 90°, 180°, 270°) + 4 reflections (horizontal, vertical, diagonal, anti-diagonal) |
+| Color Permutation | 3,628,800× | All permutations of 10 ARC colors (10! = 3,628,800) |
+| Combined | 29,030,400× | D8 × Color = 8 × 3,628,800 = 29,030,400 variants per task |
+
+### Usage Examples
+
+```bash
+# Enable all augmentation (recommended for full training)
+python scripts/train.py --deep-supervision --augment --epochs 50
+
+# D8 geometric transforms only (no color permutation)
+python scripts/train.py --deep-supervision --augment --no-color
+
+# Color permutation only (no D8 transforms)
+python scripts/train.py --deep-supervision --augment --no-d8
+```
+
+### On-the-fly Augmentation
+
+Augmentation is applied on-the-fly during training:
+
+- Fresh random transformation generated for each `__getitem__` call
+- Same task index returns different augmented versions across epochs
+- Memory efficient: no need to store precomputed augmentation variants
+- High diversity: with 29M possible variants, the model rarely sees identical examples
+
+## Evaluation
+
+### Exact-Match Accuracy
+
+The TRM uses strict exact-match evaluation: each prediction receives 1.0 (100% correct) only if ALL non-padded pixels match the ground truth exactly, or 0.0 for any mismatch. There is no partial credit. Evaluation is performed on the ARC-AGI evaluation split containing 400 tasks.
+
+When deep supervision is enabled, evaluation uses EMA (exponential moving average) weights rather than raw model weights, as EMA weights typically provide better generalization.
+
+### Checkpointing
+
+The training pipeline automatically saves checkpoints:
+
+- **Best model tracking:** Automatically saves when validation accuracy improves
+- **Complete state:** Checkpoint includes model weights, EMA weights (if enabled), optimizer state, and current epoch
+- **Resume capability:** Training can be resumed from any checkpoint with `--resume checkpoints/best_model.pt`
+- **Minimum delta:** Only saves if improvement exceeds threshold (prevents saving for negligible gains)
+
+### Early Stopping
+
+Training includes patience-based early stopping to prevent overfitting on the small ARC-AGI dataset:
+
+- **Default patience:** 5 epochs (configurable via `--patience N`)
+- **Counter reset:** Resets to 0 whenever validation accuracy improves
+- **Prevents overfitting:** Stops training when model stops improving, avoiding wasted compute
+- **Preserves best model:** Best checkpoint remains saved even after early stopping
+
