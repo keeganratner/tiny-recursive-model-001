@@ -1,6 +1,6 @@
 """Iteration history capture for visualizing recursive refinement."""
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 import torch
 
@@ -22,12 +22,14 @@ class IterationHistory:
         halt_confidences: Halting confidence scores at each iteration
         halted_early: Whether the model stopped before reaching max outer_steps
         final_prediction: Final discrete prediction (H, W) - same as iteration_grids[-1]
+        iteration_losses: Optional list of accuracy values per iteration (0.0 to 1.0)
     """
     input_grid: torch.Tensor           # (H, W) original input
     iteration_grids: List[torch.Tensor] # List of (H, W) predictions at each outer iteration
     halt_confidences: List[float]       # Confidence at each iteration
     halted_early: bool                  # Whether model halted before max iterations
     final_prediction: torch.Tensor      # (H, W) final argmax prediction
+    iteration_losses: Optional[List[float]] = None  # Optional accuracy per iteration
 
 
 class IterationHistoryCapture:
@@ -128,4 +130,88 @@ class IterationHistoryCapture:
             halt_confidences=halt_confidences,
             halted_early=halted_early,
             final_prediction=final_prediction,
+            iteration_losses=None,
         )
+
+    @torch.no_grad()
+    def capture_with_losses(
+        self, input_grid: torch.Tensor, target_grid: torch.Tensor
+    ) -> IterationHistory:
+        """
+        Run inference and capture intermediate states with loss computation.
+
+        Same as capture() but also computes accuracy per iteration against target.
+        This is useful for visualizing how prediction quality evolves.
+
+        Args:
+            input_grid: Input tensor (B, H, W) or (H, W) with values 0-9 or -1 (padding)
+            target_grid: Target tensor (H, W) with values 0-9 or -1 (padding)
+
+        Returns:
+            IterationHistory with iteration_losses populated
+
+        Raises:
+            ValueError: If batch size > 1 (current implementation supports single examples)
+        """
+        # First, capture history normally
+        history = self.capture(input_grid)
+
+        # Compute losses for each iteration
+        losses = compute_iteration_losses(history, target_grid)
+
+        # Update history with losses
+        history.iteration_losses = losses
+
+        return history
+
+
+def compute_iteration_losses(
+    history: IterationHistory, target_grid: torch.Tensor
+) -> List[float]:
+    """
+    Compute exact-match accuracy for each iteration vs target.
+
+    This function computes the accuracy (0.0 to 1.0) of each iteration's prediction
+    compared to the target grid. Accuracy of 1.0 means ALL non-padded pixels match
+    perfectly, 0.0 means at least one mismatch exists.
+
+    Args:
+        history: IterationHistory with iteration_grids
+        target_grid: Target grid (H, W) with values 0-9 or -1 (padding)
+
+    Returns:
+        List of accuracy values (0.0 to 1.0), one per iteration
+
+    Example:
+        >>> history = capture.capture(input_grid)
+        >>> target = torch.zeros(5, 5)
+        >>> losses = compute_iteration_losses(history, target)
+        >>> losses
+        [0.0, 0.0, 1.0]  # Got it right on 3rd iteration
+    """
+    accuracies = []
+
+    # Convert target to numpy for comparison
+    target_np = target_grid.cpu().numpy()
+
+    for iteration_grid in history.iteration_grids:
+        # Convert prediction to numpy
+        pred_np = iteration_grid.cpu().numpy()
+
+        # Create mask for valid positions (ignore padding)
+        mask = (target_np != -1) & (pred_np != -1)
+
+        # Handle empty mask (no valid positions) - vacuously true
+        if mask.sum() == 0:
+            accuracies.append(1.0)
+            continue
+
+        # Extract valid positions
+        valid_preds = pred_np[mask]
+        valid_targets = target_np[mask]
+
+        # Check if ALL predictions match targets
+        is_perfect = (valid_preds == valid_targets).all()
+        accuracies.append(float(is_perfect))
+
+    return accuracies
