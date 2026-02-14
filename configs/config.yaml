@@ -20,7 +20,7 @@ training:
   grad_clip_norm: 1.0
 
 data:
-  batch_size: 32
+  batch_size: 8
   num_workers: 4
 
 augmentation:

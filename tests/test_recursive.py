@@ -370,6 +370,52 @@ class TestIntermediateStates:
             f"halted_early should match: {out_intermediates['halted_early']} vs {out_regular['halted_early']}"
 
 
+class TestGradientFlowThroughRecursion:
+    """Verify that gradients flow through recursive state updates via soft embeddings."""
+
+    def test_gradients_reach_all_color_embeddings(self):
+        """Soft embedding should distribute gradient across all colors, not just argmax winner."""
+        net = TRMNetwork(hidden_dim=64, num_layers=1, num_heads=4)
+        emb = GridEmbedding(64)
+        rec = RecursiveRefinement(net, emb, outer_steps=2, inner_steps=2,
+                                   enable_halting=False, num_colors=10)
+
+        x = torch.randint(0, 10, (1, 4, 4))
+        out = rec(x)
+        out["logits"].sum().backward()
+
+        assert emb.embedding.weight.grad is not None, "No gradient on embedding weights"
+
+        # With soft embedding, softmax distributes non-zero probability to all colors,
+        # so all 10 color rows of the embedding table should receive gradient.
+        color_grads = emb.embedding.weight.grad[:10]  # indices 0-9 are colors
+        nonzero_count = (color_grads.abs().sum(dim=-1) > 0).sum().item()
+        assert nonzero_count == 10, (
+            f"Only {nonzero_count}/10 color embeddings received gradient. "
+            "Soft embedding should route gradient through all colors."
+        )
+
+    def test_gradient_norm_nonzero_with_multiple_outer_steps(self):
+        """Gradient norm should be substantial, proving gradients flow through recursion."""
+        net = TRMNetwork(hidden_dim=64, num_layers=1, num_heads=4)
+        emb = GridEmbedding(64)
+        rec = RecursiveRefinement(net, emb, outer_steps=3, inner_steps=3,
+                                   enable_halting=False, num_colors=10)
+
+        x = torch.randint(0, 10, (2, 4, 4))
+        out = rec(x)
+        out["logits"].sum().backward()
+
+        total_grad_norm = sum(
+            p.grad.norm().item()
+            for p in rec.parameters()
+            if p.grad is not None
+        )
+        assert total_grad_norm > 1e-6, (
+            f"Gradient norm {total_grad_norm:.2e} is near zero — gradients are not flowing"
+        )
+
+
 class TestRecursiveRefinementIntegration:
     """Integration tests for recursive refinement."""
 

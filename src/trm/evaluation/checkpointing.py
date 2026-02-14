@@ -65,10 +65,15 @@ def save_checkpoint(
     filepath.parent.mkdir(parents=True, exist_ok=True)
 
     checkpoint = {
-        "trainer_state": trainer.state_dict(),
+        "model_state": trainer.model.state_dict(),
+        "optimizer_state": trainer.optimizer.state_dict(),
         "epoch": epoch,
         "step": step,
     }
+
+    # Include EMA if available
+    if hasattr(trainer, 'ema_model') and trainer.ema_model is not None:
+        checkpoint["ema_state"] = trainer.ema_model.state_dict()
 
     if best_accuracy is not None:
         checkpoint["best_accuracy"] = best_accuracy
@@ -115,7 +120,12 @@ def load_checkpoint(
     checkpoint = torch.load(filepath, map_location=map_location, weights_only=False)
 
     # Restore trainer state
-    trainer.load_state_dict(checkpoint["trainer_state"])
+    trainer.model.load_state_dict(checkpoint["model_state"])
+    trainer.optimizer.load_state_dict(checkpoint["optimizer_state"])
+
+    # Restore EMA if available
+    if "ema_state" in checkpoint and hasattr(trainer, 'ema_model') and trainer.ema_model is not None:
+        trainer.ema_model.load_state_dict(checkpoint["ema_state"])
 
     # Return metadata for training loop
     result = {

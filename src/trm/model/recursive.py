@@ -69,7 +69,9 @@ class RecursiveRefinement(nn.Module):
         Combine multiple states by adding their embeddings.
 
         States can be either raw grids (values 0-9) or logits (B, H, W, num_colors).
-        Logits are converted to hard predictions via argmax before embedding.
+        Logit states use a soft (differentiable) embedding: a softmax-weighted sum
+        over the color embedding vectors. This preserves gradient flow through the
+        recursive state updates, unlike argmax which has zero gradient.
 
         Args:
             states: List of state tensors to combine
@@ -82,11 +84,18 @@ class RecursiveRefinement(nn.Module):
 
         for state, logit_flag in zip(states, is_logits):
             if logit_flag:
-                # Convert logits to hard predictions: (B, H, W, num_colors) -> (B, H, W)
-                state = torch.argmax(state, dim=-1)
-
-            # Embed state: (B, H, W) -> (B, H, W, hidden_dim)
-            embedded = self.embedding(state)
+                # Soft (differentiable) embedding: softmax-weighted sum over color embeddings.
+                # state: (B, H, W, num_colors)
+                probs = torch.softmax(state, dim=-1)
+                # Color embedding vectors, excluding the pad token at index 10.
+                # shape: (num_colors, hidden_dim)
+                color_embs = self.embedding.embedding.weight[:self.num_colors]
+                # Weighted sum: (B, H, W, num_colors) @ (num_colors, hidden_dim)
+                # -> (B, H, W, hidden_dim)
+                embedded = probs @ color_embs
+            else:
+                # Hard embedding for raw grid inputs (values 0-9 or -1 for padding)
+                embedded = self.embedding(state)
             embeddings.append(embedded)
 
         # Add all embeddings element-wise
