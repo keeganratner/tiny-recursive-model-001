@@ -1,6 +1,7 @@
 """Training script for TRM on ARC-AGI dataset."""
 import argparse
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # Add project root to path for imports
@@ -9,6 +10,7 @@ sys.path.insert(0, str(project_root))
 
 from omegaconf import OmegaConf, DictConfig
 import torch
+from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
 
 from src.trm.model import TRMNetwork, GridEmbedding, RecursiveRefinement
@@ -214,6 +216,14 @@ def main():
         "--no-validate", action="store_true",
         help="Skip validation (train only)"
     )
+    parser.add_argument(
+        "--log-dir", type=str, default="runs",
+        help="TensorBoard log directory (default: runs/)"
+    )
+    parser.add_argument(
+        "--no-log", action="store_true",
+        help="Disable TensorBoard logging"
+    )
     args = parser.parse_args()
 
     # Load config (Hydra-compatible YAML format)
@@ -263,6 +273,18 @@ def main():
     # Create checkpoint directory
     checkpoint_dir = Path(args.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    # TensorBoard logging (enabled by default)
+    writer = None
+    if not args.no_log:
+        mode = "deep_sup" if args.deep_supervision else "basic"
+        aug = "_aug" if args.augment else ""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_name = f"trm_{mode}{aug}_{timestamp}"
+        log_dir = Path(args.log_dir) / run_name
+        writer = SummaryWriter(log_dir=str(log_dir))
+        print(f"TensorBoard: tensorboard --logdir {args.log_dir}")
+        print(f"Run: {run_name}")
 
     # Create trainer
     if args.deep_supervision:
@@ -385,18 +407,30 @@ def main():
                 f"Acc: {metrics['acc']:.2%}"
             )
 
+        # Log training metrics to TensorBoard
+        if writer is not None:
+            writer.add_scalar("train/loss", metrics["loss"], epoch)
+            writer.add_scalar("train/ce_loss", metrics["ce"], epoch)
+            writer.add_scalar("train/bce_loss", metrics["bce"], epoch)
+            writer.add_scalar("train/accuracy", metrics["acc"], epoch)
+            if args.deep_supervision and "steps" in metrics:
+                writer.add_scalar("train/sup_steps", metrics["steps"], epoch)
+
         # Validation
         if val_dataloader is not None:
             # Use EMA model for validation if available (deep supervision)
             val_model = trainer.get_ema_model() if hasattr(trainer, 'get_ema_model') else trainer.model
             val_acc = validate_epoch(val_model, val_dataloader, device)
 
+            if writer is not None:
+                writer.add_scalar("val/accuracy", val_acc, epoch)
+
             # Update best model tracker
             is_best = best_model_tracker.update(
                 trainer=trainer,
                 accuracy=val_acc,
                 epoch=epoch,
-                step=0,  # We don't track step-level granularity in this script
+                step=0,
             )
 
             # Add validation to message
@@ -427,6 +461,9 @@ def main():
     if best_model_tracker is not None:
         print(f"\nBest validation accuracy: {best_model_tracker.get_best_accuracy():.4f}")
         print(f"Best model saved to: {checkpoint_dir / 'best_model.pt'}")
+
+    if writer is not None:
+        writer.close()
 
     print("\nTraining complete!")
 
