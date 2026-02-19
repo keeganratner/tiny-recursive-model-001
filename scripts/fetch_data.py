@@ -117,22 +117,26 @@ def build_splits(all_tasks_dir: Path, train_dir: Path, holdout_dir: Path,
 def fetch_conceptarc(tmp_dir: Path, all_tasks_dir: Path) -> int:
     """Download ConceptARC and copy tasks to all_tasks_dir. Returns count added."""
     extract_dir = download_zip(CONCEPTARC_URL, tmp_dir, "conceptarc")
+    # Recursively find all JSON files anywhere in the extracted directory
     tasks = collect_json_tasks(extract_dir)
     added = 0
     for task_path in tasks:
         if copy_task(task_path, all_tasks_dir):
             added += 1
+    if added == 0:
+        print(f"  WARNING: No valid ARC tasks found in ConceptARC extract. "
+              f"Checked {extract_dir} recursively.")
     return added
 
 
 def fetch_rearc(tmp_dir: Path, all_tasks_dir: Path) -> int:
     """Download Re-ARC and copy tasks to all_tasks_dir. Returns count added.
 
-    Re-ARC may contain a generate.py script; if tasks/ directory exists we
-    use those directly, otherwise we attempt to run generate.py.
+    Re-ARC may contain a generate.py script; if tasks exist we use those
+    directly, otherwise we attempt to run generate.py.
     """
     extract_dir = download_zip(REARC_URL, tmp_dir, "rearc")
-    # Re-ARC stores tasks under re-arc-main/tasks/ or similar
+    # Recursively find all JSON files
     tasks = collect_json_tasks(extract_dir)
     added = 0
     for task_path in tasks:
@@ -266,8 +270,8 @@ def main():
     print("\n" + "=" * 60)
     print("Dataset summary:")
     print(f"  Total tasks:          {total_tasks}")
-    print(f"  Training tasks:       {n_train}  → data/train_all/")
-    print(f"  Validation holdout:   {n_holdout} → data/validation_holdout/")
+    print(f"  Training tasks:       {n_train}  -> data/train_all/")
+    print(f"  Validation holdout:   {n_holdout} -> data/validation_holdout/")
     print("=" * 60)
     print("\nNext steps:")
     print("  python -m pytest tests/test_long_run.py -v")
@@ -275,6 +279,7 @@ def main():
     print("    --batch-size 4 --train-split train_all --val-split evaluation \\")
     print("    --epochs 5000 --patience 50000 --save-every 250 --embed-lr 1e-4 \\")
     print("    --val-every 50 --bf16 --log-dir logs")
+    print("(Expected val acc >0.3 within 2000-3000 epochs)")
 
 
 if __name__ == "__main__":
