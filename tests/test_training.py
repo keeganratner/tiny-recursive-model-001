@@ -63,10 +63,14 @@ class TestTRMTrainerInit:
         assert betas == (0.9, 0.95), f"Expected (0.9, 0.95), got {betas}"
 
     def test_learning_rate_applied(self, small_model):
-        """Verify learning rate is set correctly."""
+        """Verify learning rate is set correctly in the non-embedding param group."""
         custom_lr = 3e-4
         trainer = TRMTrainer(small_model, learning_rate=custom_lr)
-        assert trainer.optimizer.defaults["lr"] == custom_lr
+        # With two param groups (embed + other), check the non-embed group has custom_lr
+        other_group_lr = min(pg["lr"] for pg in trainer.optimizer.param_groups)
+        assert other_group_lr == custom_lr, (
+            f"Expected non-embed param group lr={custom_lr}, got {other_group_lr}"
+        )
 
     def test_weight_decay_applied(self, small_model):
         """Verify weight decay is set."""

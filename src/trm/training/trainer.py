@@ -23,6 +23,8 @@ class TRMTrainer:
     Args:
         model: RecursiveRefinement instance to train
         learning_rate: Learning rate for AdamW (default 1e-4)
+        embed_lr: Separate learning rate for embedding layers (default: same as learning_rate).
+            The paper uses 1e-2 for embeddings vs 1e-4 for the rest of the network.
         weight_decay: Weight decay for AdamW (default 0.01)
         beta1: First beta for AdamW (default 0.9)
         beta2: Second beta for AdamW (default 0.95)
@@ -33,20 +35,33 @@ class TRMTrainer:
         self,
         model: RecursiveRefinement,
         learning_rate: float = 1e-4,
+        embed_lr: float | None = None,
         weight_decay: float = 0.01,
         beta1: float = 0.9,
         beta2: float = 0.95,
         halting_loss_weight: float = 0.1,
+        use_amp: bool = False,
     ):
         self.model = model
         self.halting_loss_weight = halting_loss_weight
+        self.use_amp = use_amp
+
+        # Split parameters: embedding layers get a separate (higher) LR per the paper.
+        # Paper uses 1e-2 for embeddings vs 1e-4 for the transformer weights.
+        _embed_lr = embed_lr if embed_lr is not None else learning_rate
+        embed_modules = [model.embedding, model.role_embedding]
+        embed_param_ids = set(id(p) for m in embed_modules for p in m.parameters())
+        embed_params = [p for p in model.parameters() if id(p) in embed_param_ids]
+        other_params = [p for p in model.parameters() if id(p) not in embed_param_ids]
 
         # Create AdamW optimizer with paper betas (TRAIN-05)
         self.optimizer = AdamW(
-            model.parameters(),
-            lr=learning_rate,
-            weight_decay=weight_decay,
+            [
+                {"params": embed_params, "lr": _embed_lr},
+                {"params": other_params, "lr": learning_rate},
+            ],
             betas=(beta1, beta2),
+            weight_decay=weight_decay,
         )
 
     def compute_loss(
@@ -125,7 +140,9 @@ class TRMTrainer:
         halt_target = torch.tensor(
             per_sample_correct, device=logits.device, dtype=torch.float32
         )
-        bce_loss = F.binary_cross_entropy(halt_confidence, halt_target)
+        # BCE must run in float32 (F.binary_cross_entropy is unsafe under BF16 autocast)
+        with torch.autocast(device_type="cuda", enabled=False):
+            bce_loss = F.binary_cross_entropy(halt_confidence.float(), halt_target.float())
 
         # Combine losses
         total_loss = ce_loss + self.halting_loss_weight * bce_loss
@@ -163,15 +180,14 @@ class TRMTrainer:
         self.model.train()
 
         # Zero gradients
-        self.optimizer.zero_grad()
+        self.optimizer.zero_grad(set_to_none=True)
 
-        # Forward pass through model
-        output = self.model(input_grids)
-        logits = output["logits"]
-        halt_confidence = output["halt_confidence"]
-
-        # Compute loss
-        loss_dict = self.compute_loss(logits, target_grids, halt_confidence, mask)
+        # Forward pass + loss (BF16 autocast when use_amp=True)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=self.use_amp):
+            output = self.model(input_grids)
+            logits = output["logits"]
+            halt_confidence = output["halt_confidence"]
+            loss_dict = self.compute_loss(logits, target_grids, halt_confidence, mask)
 
         # Backward pass
         loss_dict["total_loss"].backward()
@@ -180,6 +196,52 @@ class TRMTrainer:
         self.optimizer.step()
 
         # Return metrics (detach for clean values)
+        return {
+            "total_loss": loss_dict["total_loss"].item(),
+            "ce_loss": loss_dict["ce_loss"].item(),
+            "bce_loss": loss_dict["bce_loss"].item(),
+            "accuracy": loss_dict["accuracy"].item(),
+            "iterations": output["iterations"],
+        }
+
+    def train_step_in_context(
+        self,
+        demo_inputs: torch.Tensor,
+        demo_outputs: torch.Tensor,
+        num_demos: torch.Tensor,
+        test_input: torch.Tensor,
+        target_grids: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> dict:
+        """
+        Single in-context training step.
+
+        Passes all demo pairs as context alongside the test input, then
+        computes loss only on the test output positions.
+
+        Args:
+            demo_inputs:  (B, max_demos, H_d, W_d) padded demo inputs
+            demo_outputs: (B, max_demos, H_d, W_d) padded demo outputs
+            num_demos:    (B,) actual demo count per batch item
+            test_input:   (B, H_t, W_t) query input
+            target_grids: (B, H_t, W_t) expected test output
+            mask:         (B, H_t, W_t) True for valid output positions
+
+        Returns:
+            Dictionary with total_loss, ce_loss, bce_loss, accuracy, iterations.
+        """
+        self.model.train()
+        self.optimizer.zero_grad(set_to_none=True)
+
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=self.use_amp):
+            output = self.model.forward_in_context(demo_inputs, demo_outputs, num_demos, test_input)
+            logits = output["logits"]
+            halt_confidence = output["halt_confidence"]
+            loss_dict = self.compute_loss(logits, target_grids, halt_confidence, mask)
+
+        loss_dict["total_loss"].backward()
+        self.optimizer.step()
+
         return {
             "total_loss": loss_dict["total_loss"].item(),
             "ce_loss": loss_dict["ce_loss"].item(),

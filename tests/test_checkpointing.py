@@ -78,10 +78,9 @@ class TestCheckpointSaveLoad:
         save_checkpoint(trainer, filepath, epoch=5, step=100)
 
         checkpoint = torch.load(filepath, weights_only=False)
-        assert "trainer_state" in checkpoint, "Checkpoint should contain trainer state"
-        assert "model_state_dict" in checkpoint["trainer_state"]
-        assert "ema_state_dict" in checkpoint["trainer_state"]
-        assert "optimizer_state_dict" in checkpoint["trainer_state"]
+        assert "model_state" in checkpoint, "Checkpoint should contain model_state"
+        assert "optimizer_state" in checkpoint, "Checkpoint should contain optimizer_state"
+        assert "ema_state" in checkpoint, "Checkpoint should contain ema_state (EMA present)"
 
     def test_checkpoint_contains_metadata(self, model_and_trainer, tmp_path):
         """Test that checkpoint contains epoch, step, and optional metadata."""
@@ -183,8 +182,9 @@ class TestCheckpointSaveLoad:
 
         assert info["epoch"] == 2
         assert info["step"] == 40
-        assert "best_accuracy" not in info
-        assert "metadata" not in info
+        # best_accuracy defaults to 0.0 and metadata defaults to {} when absent
+        assert info["best_accuracy"] == 0.0
+        assert info["metadata"] == {}
 
     def test_checkpoint_roundtrip_preserves_training(self, model_and_trainer, tmp_path):
         """Test that checkpoint roundtrip preserves training state exactly."""

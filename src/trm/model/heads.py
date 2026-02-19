@@ -54,18 +54,24 @@ class HaltingHead(nn.Module):
         # Linear projection to scalar confidence (no bias per paper spec)
         self.proj = nn.Linear(hidden_dim, 1, bias=False)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
         """
         Predict halting confidence from hidden states.
 
         Args:
-            x: Hidden states of shape (B, seq_len, hidden_dim)
+            x:    Hidden states of shape (B, seq_len, hidden_dim)
+            mask: (B, seq_len) bool, True=valid. If None, average all positions.
 
         Returns:
             Confidence scores of shape (B,) in range [0, 1]
         """
-        # Global average pooling over sequence dimension
-        pooled = x.mean(dim=1)  # (B, hidden_dim)
+        if mask is not None:
+            # Masked average: only valid tokens contribute to pooling
+            mask_f = mask.unsqueeze(-1).float()          # (B, seq_len, 1)
+            pooled = (x * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp(min=1)
+        else:
+            # Global average pooling over sequence dimension
+            pooled = x.mean(dim=1)  # (B, hidden_dim)
 
         # Project to scalar and apply sigmoid
         confidence = torch.sigmoid(self.proj(pooled))  # (B, 1)

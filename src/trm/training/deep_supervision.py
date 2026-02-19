@@ -35,6 +35,7 @@ class DeepSupervisionTrainer(TRMTrainer):
         self,
         model: RecursiveRefinement,
         learning_rate: float = 1e-4,
+        embed_lr: float | None = None,
         weight_decay: float = 0.01,
         beta1: float = 0.9,
         beta2: float = 0.95,
@@ -42,9 +43,10 @@ class DeepSupervisionTrainer(TRMTrainer):
         max_sup_steps: int = 16,
         grad_clip_norm: float = 1.0,
         ema_decay: float = 0.999,
+        use_amp: bool = False,
     ):
         super().__init__(
-            model, learning_rate, weight_decay, beta1, beta2, halting_loss_weight
+            model, learning_rate, embed_lr, weight_decay, beta1, beta2, halting_loss_weight, use_amp
         )
         self.max_sup_steps = max_sup_steps
         self.grad_clip_norm = grad_clip_norm
@@ -93,7 +95,7 @@ class DeepSupervisionTrainer(TRMTrainer):
                 - halted_early: Whether halting stopped early
         """
         self.model.train()
-        self.optimizer.zero_grad()
+        self.optimizer.zero_grad(set_to_none=True)
 
         B, H, W = input_grids.shape
         device = input_grids.device
@@ -113,34 +115,35 @@ class DeepSupervisionTrainer(TRMTrainer):
 
         # Deep supervision loop
         for sup_step in range(self.max_sup_steps):
-            # Inner loop: refine latent z
-            for i in range(self.model.inner_steps):
-                combined = self.model._combine_states(
-                    states=[input_grids, y, z],
-                    is_logits=[False, True, True]
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=self.use_amp):
+                # Inner loop: refine latent z
+                for i in range(self.model.inner_steps):
+                    combined = self.model._combine_states(
+                        states=[input_grids, y, z],
+                        is_logits=[False, True, True]
+                    )
+                    output = self.model._forward_through_network(combined)
+                    z = output["logits"]
+
+                # Outer step: update answer y
+                combined_yz = self.model._combine_states(
+                    states=[y, z],
+                    is_logits=[True, True]
                 )
-                output = self.model._forward_through_network(combined)
-                z = output["logits"]
+                output = self.model._forward_through_network(combined_yz)
+                y = output["logits"]
+                halt_confidence = output["halt_confidence"]
+                last_halt_confidence = halt_confidence
 
-            # Outer step: update answer y
-            combined_yz = self.model._combine_states(
-                states=[y, z],
-                is_logits=[True, True]
-            )
-            output = self.model._forward_through_network(combined_yz)
-            y = output["logits"]
-            halt_confidence = output["halt_confidence"]
-            last_halt_confidence = halt_confidence
+                # Compute loss at this supervision step (TRAIN-01)
+                loss_dict = self.compute_loss(y, target_grids, halt_confidence, mask)
+                step_loss = loss_dict["total_loss"]
 
-            # Compute loss at this supervision step (TRAIN-01)
-            loss_dict = self.compute_loss(y, target_grids, halt_confidence, mask)
-            step_loss = loss_dict["total_loss"]
-
-            total_loss = total_loss + step_loss
-            total_ce_loss = total_ce_loss + loss_dict["ce_loss"]
-            total_bce_loss = total_bce_loss + loss_dict["bce_loss"]
-            last_accuracy = loss_dict["accuracy"]
-            steps_taken += 1
+                total_loss = total_loss + step_loss
+                total_ce_loss = total_ce_loss + loss_dict["ce_loss"]
+                total_bce_loss = total_bce_loss + loss_dict["bce_loss"]
+                last_accuracy = loss_dict["accuracy"]
+                steps_taken += 1
 
             # CRITICAL: Detach states between supervision steps (TRAIN-02)
             # This prevents backpropagation through previous supervision iterations
@@ -180,6 +183,42 @@ class DeepSupervisionTrainer(TRMTrainer):
             "steps": steps_taken,
             "grad_norm": grad_norm.item(),
             "halted_early": halted_early,
+        }
+
+    def train_step_in_context(
+        self,
+        demo_inputs: torch.Tensor,
+        demo_outputs: torch.Tensor,
+        num_demos: torch.Tensor,
+        test_input: torch.Tensor,
+        target_grids: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> dict:
+        """In-context training step with grad clipping and EMA update."""
+        self.model.train()
+        self.optimizer.zero_grad(set_to_none=True)
+
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=self.use_amp):
+            output = self.model.forward_in_context(demo_inputs, demo_outputs, num_demos, test_input)
+            logits = output["logits"]
+            halt_confidence = output["halt_confidence"]
+            loss_dict = self.compute_loss(logits, target_grids, halt_confidence, mask)
+
+        loss_dict["total_loss"].backward()
+
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            self.model.parameters(), max_norm=self.grad_clip_norm
+        )
+        self.optimizer.step()
+        self.ema.update_parameters(self.model)
+
+        return {
+            "total_loss": loss_dict["total_loss"].item(),
+            "ce_loss": loss_dict["ce_loss"].item(),
+            "bce_loss": loss_dict["bce_loss"].item(),
+            "accuracy": loss_dict["accuracy"].item(),
+            "iterations": output["iterations"],
+            "grad_norm": grad_norm.item(),
         }
 
     def get_ema_model(self) -> nn.Module:

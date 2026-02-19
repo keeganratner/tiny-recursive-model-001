@@ -1,6 +1,7 @@
 """Exact-match accuracy evaluation for ARC-AGI tasks."""
 import torch
 import torch.nn as nn
+from typing import Optional
 
 
 def compute_exact_match_accuracy(
@@ -116,4 +117,51 @@ def evaluate_batch(
         "predictions": predictions,
         "accuracy": accuracy,
         "mean_accuracy": mean_accuracy,
+    }
+
+
+def evaluate_batch_in_context(
+    model: nn.Module,
+    demo_inputs: torch.Tensor,
+    demo_outputs: torch.Tensor,
+    num_demos: torch.Tensor,
+    test_input: torch.Tensor,
+    target_grids: torch.Tensor,
+    mask: torch.Tensor,
+) -> dict:
+    """
+    Evaluate model on a batch using demonstration context (in-context learning).
+
+    Passes all demo pairs as context to the model, then measures exact-match
+    accuracy on the test output only. This is the correct ARC-AGI evaluation
+    protocol: the model sees training examples and must solve the test grid.
+
+    Args:
+        model:        Model with forward_in_context() method
+        demo_inputs:  (B, max_demos, H_d, W_d) padded demo input grids
+        demo_outputs: (B, max_demos, H_d, W_d) padded demo output grids
+        num_demos:    (B,) actual demo count per batch item
+        test_input:   (B, H_t, W_t) query input grid
+        target_grids: (B, H_t, W_t) expected test output
+        mask:         (B, H_t, W_t) True for valid output positions
+
+    Returns:
+        Dictionary containing:
+            - predictions: (B, H_t, W_t) argmax predictions
+            - accuracy: (B,) per-sample exact-match (1.0 or 0.0)
+            - mean_accuracy: float — fraction of tasks solved perfectly
+            - iterations: total network forward passes
+    """
+    with torch.no_grad():
+        output = model.forward_in_context(demo_inputs, demo_outputs, num_demos, test_input)
+        logits = output["logits"]               # (B, H_t, W_t, num_colors)
+        predictions = torch.argmax(logits, dim=-1)  # (B, H_t, W_t)
+        accuracy = compute_exact_match_accuracy(logits, target_grids, mask)
+        mean_accuracy = accuracy.mean().item()
+
+    return {
+        "predictions": predictions,
+        "accuracy": accuracy,
+        "mean_accuracy": mean_accuracy,
+        "iterations": output["iterations"],
     }

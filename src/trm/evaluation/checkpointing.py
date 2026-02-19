@@ -8,6 +8,7 @@ This module provides utilities for:
 Key functions:
     - save_checkpoint: Save trainer state to disk
     - load_checkpoint: Load trainer state from checkpoint
+    - save_periodic_checkpoint: Save a timestamped periodic checkpoint
     - BestModelTracker: Auto-save best model when accuracy improves
 
 Design:
@@ -20,46 +21,35 @@ from pathlib import Path
 from typing import Optional, Any
 
 
+def _get_ema(trainer: Any):
+    """Return the EMA model if it exists, regardless of attribute name."""
+    if hasattr(trainer, 'ema') and trainer.ema is not None:
+        return trainer.ema
+    if hasattr(trainer, 'ema_model') and trainer.ema_model is not None:
+        return trainer.ema_model
+    return None
+
+
 def save_checkpoint(
     trainer: Any,
     filepath: str | Path,
     epoch: int,
     step: int,
     best_accuracy: Optional[float] = None,
+    total_epochs: Optional[int] = None,
     metadata: Optional[dict] = None,
 ) -> None:
     """
     Save complete training state to checkpoint file.
 
-    Saves model, EMA, optimizer state from trainer.state_dict() along with
-    training progress metadata. Checkpoint can be used to resume training
-    from this exact point.
-
     Args:
-        trainer: Trainer instance with state_dict() method
+        trainer: Trainer instance with model and optimizer attributes
         filepath: Path where checkpoint will be saved
-        epoch: Current training epoch
+        epoch: Current training epoch (within this run)
         step: Current training step
         best_accuracy: Best validation accuracy so far (optional)
+        total_epochs: Cumulative epochs across all sessions (optional)
         metadata: Additional metadata to save (optional)
-
-    Saves:
-        Dictionary containing:
-            - trainer_state: Complete trainer state dict
-            - epoch: Training epoch number
-            - step: Training step number
-            - best_accuracy: Best validation accuracy (if provided)
-            - metadata: Additional metadata (if provided)
-
-    Example:
-        save_checkpoint(
-            trainer=deep_trainer,
-            filepath="checkpoints/model_epoch_10.pt",
-            epoch=10,
-            step=5000,
-            best_accuracy=0.87,
-            metadata={"config": config_dict}
-        )
     """
     filepath = Path(filepath)
     filepath.parent.mkdir(parents=True, exist_ok=True)
@@ -69,11 +59,13 @@ def save_checkpoint(
         "optimizer_state": trainer.optimizer.state_dict(),
         "epoch": epoch,
         "step": step,
+        "total_epochs": total_epochs if total_epochs is not None else (epoch + 1),
     }
 
-    # Include EMA if available
-    if hasattr(trainer, 'ema_model') and trainer.ema_model is not None:
-        checkpoint["ema_state"] = trainer.ema_model.state_dict()
+    # Include EMA if available (supports both trainer.ema and trainer.ema_model)
+    ema = _get_ema(trainer)
+    if ema is not None:
+        checkpoint["ema_state"] = ema.state_dict()
 
     if best_accuracy is not None:
         checkpoint["best_accuracy"] = best_accuracy
@@ -92,11 +84,8 @@ def load_checkpoint(
     """
     Load checkpoint and restore trainer state.
 
-    Loads checkpoint file and restores trainer state (model, EMA, optimizer).
-    Returns checkpoint metadata for training loop to resume from correct position.
-
     Args:
-        trainer: Trainer instance with load_state_dict() method
+        trainer: Trainer instance with model and optimizer attributes
         filepath: Path to checkpoint file
         map_location: Device mapping for checkpoint (e.g., 'cpu', 'cuda:0')
 
@@ -104,17 +93,9 @@ def load_checkpoint(
         Dictionary containing:
             - epoch: Epoch number from checkpoint
             - step: Step number from checkpoint
-            - best_accuracy: Best validation accuracy (if saved)
-            - metadata: Additional metadata (if saved)
-
-    Example:
-        info = load_checkpoint(
-            trainer=deep_trainer,
-            filepath="checkpoints/model_epoch_10.pt",
-            map_location="cpu"
-        )
-        start_epoch = info["epoch"] + 1
-        best_acc = info.get("best_accuracy", 0.0)
+            - total_epochs: Cumulative epochs across all sessions
+            - best_accuracy: Best validation accuracy (0.0 if not saved)
+            - metadata: Additional metadata ({} if not saved)
     """
     filepath = Path(filepath)
     checkpoint = torch.load(filepath, map_location=map_location, weights_only=False)
@@ -123,23 +104,47 @@ def load_checkpoint(
     trainer.model.load_state_dict(checkpoint["model_state"])
     trainer.optimizer.load_state_dict(checkpoint["optimizer_state"])
 
-    # Restore EMA if available
-    if "ema_state" in checkpoint and hasattr(trainer, 'ema_model') and trainer.ema_model is not None:
-        trainer.ema_model.load_state_dict(checkpoint["ema_state"])
+    # Restore EMA if available (supports both trainer.ema and trainer.ema_model)
+    ema = _get_ema(trainer)
+    if "ema_state" in checkpoint and ema is not None:
+        ema.load_state_dict(checkpoint["ema_state"])
 
-    # Return metadata for training loop
-    result = {
+    return {
         "epoch": checkpoint["epoch"],
         "step": checkpoint["step"],
+        "total_epochs": checkpoint.get("total_epochs", checkpoint["epoch"] + 1),
+        "best_accuracy": checkpoint.get("best_accuracy", 0.0),
+        "metadata": checkpoint.get("metadata", {}),
     }
 
-    if "best_accuracy" in checkpoint:
-        result["best_accuracy"] = checkpoint["best_accuracy"]
 
-    if "metadata" in checkpoint:
-        result["metadata"] = checkpoint["metadata"]
+def save_periodic_checkpoint(
+    trainer: Any,
+    save_dir: str | Path,
+    epoch: int,
+    total_epochs: int,
+    best_accuracy: Optional[float] = None,
+) -> Path:
+    """Save a timestamped checkpoint for periodic saves (not best-only).
 
-    return result
+    Args:
+        trainer: Trainer instance
+        save_dir: Directory to save checkpoint in
+        epoch: Current epoch index within this run
+        total_epochs: Cumulative epoch count across all sessions
+        best_accuracy: Best validation accuracy so far (optional)
+
+    Returns:
+        Path to the saved checkpoint file
+    """
+    filepath = Path(save_dir) / f"checkpoint_epoch_{total_epochs:06d}.pt"
+    save_checkpoint(
+        trainer, filepath,
+        epoch=epoch, step=0,
+        best_accuracy=best_accuracy,
+        total_epochs=total_epochs,
+    )
+    return filepath
 
 
 class BestModelTracker:
@@ -170,14 +175,6 @@ class BestModelTracker:
         filename: str = "best_model.pt",
         min_delta: float = 0.0,
     ):
-        """
-        Initialize best model tracker.
-
-        Args:
-            save_dir: Directory for saving best model
-            filename: Checkpoint filename (default: "best_model.pt")
-            min_delta: Minimum improvement threshold (default: 0.0)
-        """
         self.save_dir = Path(save_dir)
         self.filename = filename
         self.min_delta = min_delta
@@ -190,6 +187,7 @@ class BestModelTracker:
         accuracy: float,
         epoch: int,
         step: int,
+        total_epochs: Optional[int] = None,
         metadata: Optional[dict] = None,
     ) -> bool:
         """
@@ -200,15 +198,12 @@ class BestModelTracker:
             accuracy: Current validation accuracy
             epoch: Current epoch number
             step: Current step number
+            total_epochs: Cumulative epoch count (optional)
             metadata: Additional metadata to save (optional)
 
         Returns:
             True if new best accuracy achieved and checkpoint saved
             False if accuracy did not improve
-
-        Example:
-            if tracker.update(trainer, val_acc, epoch, step):
-                print(f"Saved new best model with accuracy {val_acc:.4f}")
         """
         if accuracy > self.best_accuracy + self.min_delta:
             self.best_accuracy = accuracy
@@ -220,6 +215,7 @@ class BestModelTracker:
                 epoch=epoch,
                 step=step,
                 best_accuracy=accuracy,
+                total_epochs=total_epochs,
                 metadata=metadata,
             )
             return True

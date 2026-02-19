@@ -78,9 +78,10 @@ class TestRecursiveRefinementWeightSharing:
         net_params = sum(p.numel() for p in net.parameters())
         emb_params = sum(p.numel() for p in emb.parameters())
 
-        # RecursiveRefinement params = network params + embedding params (no extra layers)
-        assert rec_params == net_params + emb_params, \
-            f"Expected {net_params + emb_params} params, got {rec_params}"
+        # RecursiveRefinement params = network params + embedding params + role_embedding
+        role_emb_params = sum(p.numel() for p in rec.role_embedding.parameters())
+        assert rec_params == net_params + emb_params + role_emb_params, \
+            f"Expected {net_params + emb_params + role_emb_params} params, got {rec_params}"
 
     def test_recr_04_same_weights_used_each_iteration(self):
         """RECR-04: Network weights are shared, not duplicated per iteration."""

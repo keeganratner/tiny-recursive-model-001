@@ -1,5 +1,6 @@
 """ARC-AGI Dataset implementation."""
 import json
+import random
 from pathlib import Path
 from typing import List
 
@@ -23,16 +24,12 @@ class ARCDataset(Dataset):
         """Initialize ARC-AGI dataset.
 
         Args:
-            data_dir: Path to data/ directory containing training/ and evaluation/
-            split: Either "training" or "evaluation"
+            data_dir: Path to data/ directory containing the split subdirectory
+            split: Subdirectory name (e.g. "training", "evaluation", "train_all")
 
         Raises:
-            ValueError: If split is not "training" or "evaluation"
             FileNotFoundError: If split directory doesn't exist
         """
-        if split not in ("training", "evaluation"):
-            raise ValueError(f"split must be 'training' or 'evaluation', got {split}")
-
         self.data_dir = Path(data_dir)
         self.split = split
         split_dir = self.data_dir / split
@@ -115,19 +112,22 @@ class AugmentedARCDataset(Dataset):
         split: str = "training",
         enable_d8: bool = True,
         enable_color: bool = True,
+        enable_translation: bool = True,
     ):
         """Initialize augmented dataset.
 
         Args:
-            data_dir: Path to data/ directory containing training/ and evaluation/
-            split: Either "training" or "evaluation"
+            data_dir: Path to data/ directory containing the split subdirectory
+            split: Subdirectory name (e.g. "training", "evaluation", "train_all")
             enable_d8: Whether to apply D8 geometric transforms
-            enable_color: Whether to apply color permutations
+            enable_color: Whether to apply color permutations (colors 1-9, preserving 0)
+            enable_translation: Whether to apply translational augmentation (grid shift)
         """
         self.base_dataset = ARCDataset(data_dir, split)
         self.pipeline = AugmentationPipeline(
             enable_d8=enable_d8,
             enable_color=enable_color,
+            enable_translation=enable_translation,
         )
 
     def __len__(self) -> int:
@@ -140,6 +140,11 @@ class AugmentedARCDataset(Dataset):
         Each call applies FRESH random augmentation, so the same idx
         called multiple times will return different augmented versions.
 
+        Critically, the SAME augmentation (same D8 transform, same color permutation,
+        same translation offset) is applied to ALL pairs in the task. This is required
+        for in-context learning: consistent mapping across demo pairs lets the model
+        infer the transformation rule.
+
         Args:
             idx: Task index
 
@@ -148,19 +153,37 @@ class AugmentedARCDataset(Dataset):
         """
         item = self.base_dataset[idx]
 
-        # Augment each train pair
+        # Sample ONE consistent augmentation for the entire task
+        d8, color_perm = self.pipeline.sample()
+
+        # Compute translation padding once across all grids in the task
+        pad_top, pad_left = 0, 0
+        if self.pipeline.enable_translation:
+            all_grids = (
+                item["train_inputs"] + item["train_outputs"]
+                + item["test_inputs"] + item["test_outputs"]
+            )
+            if all_grids:
+                # Use max(h, w) for both dims to stay safe across D8 rotations
+                max_dim = max(max(g.shape[0], g.shape[1]) for g in all_grids)
+                avail = max(0, self.pipeline.ARC_MAX - max_dim)
+                pad_top = random.randint(0, avail)
+                pad_left = random.randint(0, avail)
+
+        def augment_one(inp, out):
+            return self.pipeline.apply_with(inp, out, d8, color_perm, pad_top, pad_left)
+
         augmented_train_inputs = []
         augmented_train_outputs = []
         for inp, out in zip(item["train_inputs"], item["train_outputs"]):
-            aug_inp, aug_out = self.pipeline.augment_pair(inp, out)
+            aug_inp, aug_out = augment_one(inp, out)
             augmented_train_inputs.append(aug_inp)
             augmented_train_outputs.append(aug_out)
 
-        # Augment each test pair with SAME augmentation per pair
         augmented_test_inputs = []
         augmented_test_outputs = []
         for inp, out in zip(item["test_inputs"], item["test_outputs"]):
-            aug_inp, aug_out = self.pipeline.augment_pair(inp, out)
+            aug_inp, aug_out = augment_one(inp, out)
             augmented_test_inputs.append(aug_inp)
             augmented_test_outputs.append(aug_out)
 

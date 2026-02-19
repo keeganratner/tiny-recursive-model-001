@@ -5,13 +5,13 @@ model:
   num_heads: 8
 
 recursion:
-  outer_steps: 3  # T in paper
-  inner_steps: 6  # n in paper
+  outer_steps: 3  # T in paper (H_cycles=3)
+  inner_steps: 4  # n in paper (L_cycles=4); was 6, corrected from official Samsung repo
   halt_threshold: 0.9
 
 training:
   learning_rate: 1e-4
-  weight_decay: 0.01
+  weight_decay: 1.0  # paper uses 1.0 for ARC-AGI; was 0.1
   beta1: 0.9
   beta2: 0.95
   ema_decay: 0.999

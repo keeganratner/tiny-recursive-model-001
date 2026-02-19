@@ -30,9 +30,9 @@ class TestARCDataset:
         assert len(ds) == 400
 
     def test_invalid_split_raises(self):
-        """Invalid split raises ValueError."""
-        with pytest.raises(ValueError):
-            ARCDataset("data", split="invalid")
+        """Non-existent split directory raises FileNotFoundError."""
+        with pytest.raises(FileNotFoundError):
+            ARCDataset("data", split="nonexistent_split_xyz")
 
     def test_task_structure(self, dataset):
         """SC3: Each task has train/test pairs accessible."""

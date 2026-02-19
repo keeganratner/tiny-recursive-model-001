@@ -208,8 +208,9 @@ class TestAugmentationPipeline:
         assert AugmentationPipeline(False, False).get_effective_multiplier() == 1
         assert AugmentationPipeline(True, False).get_effective_multiplier() == 8
         import math
-        assert AugmentationPipeline(False, True).get_effective_multiplier() == math.factorial(10)
-        assert AugmentationPipeline(True, True).get_effective_multiplier() == 8 * math.factorial(10)
+        # Color permutation preserves color 0 (black) and permutes only colors 1-9 (matches paper)
+        assert AugmentationPipeline(False, True).get_effective_multiplier() == math.factorial(9)
+        assert AugmentationPipeline(True, True).get_effective_multiplier() == 8 * math.factorial(9)
 
     def test_input_output_consistency(self):
         """Input and output must receive same augmentation."""
@@ -273,7 +274,7 @@ class TestAugmentedDataset:
         ds = AugmentedARCDataset("data", enable_d8=False, enable_color=True)
         assert ds.pipeline.enable_d8 == False
         assert ds.pipeline.enable_color == True
-        assert ds.pipeline.get_effective_multiplier() == 3628800
+        assert ds.pipeline.get_effective_multiplier() == 362880  # 9! (color 0 preserved)
 
     def test_item_structure(self):
         """Test that augmented items have correct structure."""
